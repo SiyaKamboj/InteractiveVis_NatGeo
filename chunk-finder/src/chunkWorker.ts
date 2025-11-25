@@ -1,109 +1,301 @@
-// --- helpers for detection ---
-function autoDetectGroups(nodes: NodeT[], links: LinkT[]) {
-  // Count groups and quick prefix/extension hints
+/// <reference lib="webworker" />
+
+// ---------- Types ----------
+type Mode = "ALL" | "ANY";
+
+interface NodeT {
+  id: string;
+  group: number;
+}
+
+interface LinkT {
+  source: string;
+  target: string;
+  value?: number;
+}
+
+interface GraphT {
+  nodes: NodeT[];
+  links: LinkT[];
+}
+
+// ---------- Global state inside worker ----------
+let featureToChunks: Map<string, Set<string>> | null = null;
+let featureIds: string[] = [];
+let chunkIds: string[] = [];
+
+// Just for debugging if you want to log what was chosen
+let FILE_GROUP: number | null = null;
+let CHUNK_GROUP: number | null = null;
+
+console.log("[worker] loaded");
+
+// ---------- Group detection ----------
+
+function detectGroups(
+  nodes: NodeT[],
+  links: LinkT[],
+  hintFileGroup?: number,
+  hintChunkGroup?: number
+): { fileGroup: number; chunkGroup: number } {
+  const groups = Array.from(new Set(nodes.map((n) => n.group)));
+
+  // If caller supplied explicit groups, trust them
+  if (typeof hintFileGroup === "number" && typeof hintChunkGroup === "number") {
+    console.log("[worker] using hinted groups", {
+      fileGroup: hintFileGroup,
+      chunkGroup: hintChunkGroup,
+    });
+    return { fileGroup: hintFileGroup, chunkGroup: hintChunkGroup };
+  }
+
+  // 1) Try to infer from ID prefixes
   const idsByGroup = new Map<number, string[]>();
   for (const n of nodes) {
     if (!idsByGroup.has(n.group)) idsByGroup.set(n.group, []);
     idsByGroup.get(n.group)!.push(n.id);
   }
 
-  const groups = [...idsByGroup.keys()];
-
-  // 1) Prefix/extension-based hints
-  let fileGroupHint: number ;
-  let chunkGroupHint: number;
+  let fileHint: number | undefined;
+  let chunkHint: number | undefined;
 
   for (const g of groups) {
     const ids = idsByGroup.get(g)!;
-    const fileLike = ids.some(id => id.startsWith("file_name_"));
-    const chunkLike = ids.some(id => id.startsWith("chunk_id_"));
-    if (fileLike) fileGroupHint = g;
-    if (chunkLike) chunkGroupHint = g;
+    const fileLike = ids.some(
+      (id) => id.startsWith("file_name_") || /\.(wav|mp3|flac|ogg)$/i.test(id)
+    );
+    const chunkLike = ids.some((id) => id.startsWith("chunk_id_"));
+
+    if (fileLike && fileHint === undefined) fileHint = g;
+    if (chunkLike && chunkHint === undefined) chunkHint = g;
   }
 
+  if (fileHint !== undefined && chunkHint !== undefined) {
+    console.log("[worker] detected groups from prefixes", {
+      fileGroup: fileHint,
+      chunkGroup: chunkHint,
+    });
+    return { fileGroup: fileHint, chunkGroup: chunkHint };
+  }
 
-
-  // 2) Structural heuristic
-  // Build group–group adjacency and edge counts
-  const groupNeighbors = new Map<number, Set<number>>();
-  const groupEdgeCountTo = new Map<string, number>(); // key "g1|g2" with g1<g2
-
-  const incEdge = (a: number, b: number) => {
-    if (!groupNeighbors.has(a)) groupNeighbors.set(a, new Set());
-    if (!groupNeighbors.has(b)) groupNeighbors.set(b, new Set());
-    groupNeighbors.get(a)!.add(b);
-    groupNeighbors.get(b)!.add(a);
-    const g1 = Math.min(a, b), g2 = Math.max(a, b);
-    const k = `${g1}|${g2}`;
-    groupEdgeCountTo.set(k, (groupEdgeCountTo.get(k) ?? 0) + 1);
-  };
-
-  // Build a quick node->group map
+  // 2) Very simple structural heuristic as a fallback
   const groupOf = new Map<string, number>();
   for (const n of nodes) groupOf.set(n.id, n.group);
 
+  const neighborGroups = new Map<number, Set<number>>();
   for (const { source, target } of links) {
     const gs = groupOf.get(source);
     const gt = groupOf.get(target);
-    if (gs == null || gt == null) continue;
-    if (gs === gt) continue;          // ignore intra-group edges for structure
-    incEdge(gs, gt);
+    if (gs == null || gt == null || gs === gt) continue;
+    if (!neighborGroups.has(gs)) neighborGroups.set(gs, new Set());
+    if (!neighborGroups.has(gt)) neighborGroups.set(gt, new Set());
+    neighborGroups.get(gs)!.add(gt);
+    neighborGroups.get(gt)!.add(gs);
   }
 
-  // Pick chunkGroup as the group connected to the most distinct other groups
-  let chunkGroup = chunkGroupHint ?? groups[0];
+  // chunk group = group with highest degree (connected to many others)
+  let chunkGroup = groups[0];
   let bestDeg = -1;
   for (const g of groups) {
-    const deg = groupNeighbors.get(g)?.size ?? 0;
-    if (deg > bestDeg) { bestDeg = deg; chunkGroup = g; }
+    const deg = neighborGroups.get(g)?.size ?? 0;
+    if (deg > bestDeg) {
+      bestDeg = deg;
+      chunkGroup = g;
+    }
   }
 
-  // Score each group as a file candidate
-  // Favor strong connection to chunkGroup, penalize connections elsewhere.
-  let fileGroup = fileGroupHint ?? groups[0];
-  let bestScore = -Infinity;
+  // file group = some other group; pick the one with fewest neighbors
+  let fileGroup = groups[0];
+  let bestScore = Infinity;
   for (const g of groups) {
     if (g === chunkGroup) continue;
-    const g1 = Math.min(g, chunkGroup), g2 = Math.max(g, chunkGroup);
-    const toChunk = groupEdgeCountTo.get(`${g1}|${g2}`) ?? 0;
-    const deg = (groupNeighbors.get(g)?.size ?? 0);
-    const fileLikeBoost = (idsByGroup.get(g)!.some(id => id.startsWith("file_name_") || FILE_RE.test(id)) ? 1 : 0);
-
-    // Heuristic: strong toChunk, few other neighbors, bonus if file-like names
-    const score = 3 * toChunk - 2 * Math.max(0, deg - 1) + 2 * fileLikeBoost;
-    if (score > bestScore) { bestScore = score; fileGroup = g; }
+    const deg = neighborGroups.get(g)?.size ?? 0;
+    if (deg < bestScore) {
+      bestScore = deg;
+      fileGroup = g;
+    }
   }
+
+  console.log("[worker] detected groups from structure", {
+    fileGroup,
+    chunkGroup,
+  });
 
   return { fileGroup, chunkGroup };
 }
 
-// --- kinds based on detected groups ---
-function buildKinds(nodes: NodeT[], fileGroup: number, chunkGroup: number) {
-  const groupOf = new Map<string, number>();
-  for (const n of nodes) groupOf.set(n.id, n.group);
-  const kindOf = (id: string): "file" | "chunk" | "feature" => {
-    const g = groupOf.get(id);
-    if (g === fileGroup) return "file";
-    if (g === chunkGroup) return "chunk";
-    return "feature";
-  };
-  return { groupOf, kindOf };
-}
+// ---------- Index building ----------
 
-// --- feature→chunks index ---
-function buildFeatureToChunks(g: GraphT, fileGroup: number, chunkGroup: number) {
-  const { kindOf } = buildKinds(g.nodes, fileGroup, chunkGroup);
+function buildFeatureIndex(
+  graph: GraphT,
+  fileGroup: number,
+  chunkGroup: number
+): void {
+  const groupOf = new Map<string, number>();
+  for (const n of graph.nodes) groupOf.set(n.id, n.group);
+
   const map = new Map<string, Set<string>>();
-  for (const { source, target } of g.links) {
-    const ks = kindOf(source);
-    const kt = kindOf(target);
-    if (ks === "feature" && kt === "chunk") {
+  const feats: string[] = [];
+  const chunks: string[] = [];
+
+  for (const n of graph.nodes) {
+    if (n.group === chunkGroup) {
+      chunks.push(n.id);
+    } else if (n.group !== fileGroup) {
+      // everything that is not file and not chunk is treated as feature
+      feats.push(n.id);
+    }
+  }
+
+  for (const { source, target } of graph.links) {
+    const gs = groupOf.get(source);
+    const gt = groupOf.get(target);
+    if (gs == null || gt == null) continue;
+
+    const sourceIsFile = gs === fileGroup;
+    const sourceIsChunk = gs === chunkGroup;
+    const targetIsFile = gt === fileGroup;
+    const targetIsChunk = gt === chunkGroup;
+
+    const sourceIsFeature = !sourceIsFile && !sourceIsChunk;
+    const targetIsFeature = !targetIsFile && !targetIsChunk;
+
+    // feature ↔ chunk edges (undirected)
+    if (sourceIsFeature && targetIsChunk) {
       if (!map.has(source)) map.set(source, new Set());
       map.get(source)!.add(target);
-    } else if (kt === "feature" && ks === "chunk") {
+    } else if (targetIsFeature && sourceIsChunk) {
       if (!map.has(target)) map.set(target, new Set());
       map.get(target)!.add(source);
     }
   }
-  return map;
+
+  featureToChunks = map;
+  featureIds = feats;
+  chunkIds = chunks;
+
+  console.log("[worker] index built", {
+    fileGroup,
+    chunkGroup,
+    featureCount: featureIds.length,
+    chunkCount: chunkIds.length,
+    featureKeysInMap: featureToChunks.size,
+  });
+
+  if (featureToChunks.size > 0) {
+    const [k, v] = featureToChunks.entries().next().value as [
+      string,
+      Set<string>
+    ];
+    console.log(
+      "[worker] sample feature mapping",
+      k,
+      "->",
+      v.size,
+      "chunks"
+    );
+  }
 }
+
+// ---------- Chunk computation ----------
+
+function computeChunks(selected: string[], mode: Mode): string[] {
+  if (!featureToChunks) {
+    console.log("[worker] compute: no index yet");
+    return [];
+  }
+
+  console.log("[worker] computeChunks", { selected, mode });
+
+  const sets: Set<string>[] = selected.map(
+    (f) => featureToChunks!.get(f) ?? new Set<string>()
+  );
+
+  console.log(
+    "[worker] per-feature set sizes",
+    sets.map((s) => s.size)
+  );
+
+  if (sets.length === 0) return [];
+
+  let result: Set<string>;
+
+  if (mode === "ALL") {
+    // intersection
+    sets.sort((a, b) => a.size - b.size);
+    result = new Set<string>(sets[0]);
+    for (let i = 1; i < sets.length; i++) {
+      const next = new Set<string>();
+      for (const x of result) if (sets[i].has(x)) next.add(x);
+      result = next;
+    }
+  } else {
+    // ANY: union
+    result = new Set<string>();
+    for (const s of sets) for (const x of s) result.add(x);
+  }
+
+  const out = Array.from(result).sort();
+  console.log("[worker] computeChunks result size", out.length);
+  return out;
+}
+
+// ---------- Message handler ----------
+
+// eslint-disable-next-line no-restricted-globals
+self.onmessage = (ev: MessageEvent) => {
+  const msg = ev.data;
+  console.log("[worker] onmessage", msg.type);
+
+  try {
+    if (msg.type === "initFromText") {
+      const text: string = msg.text;
+      const hintFileGroup: number | undefined = msg.fileGroup;
+      const hintChunkGroup: number | undefined = msg.chunkGroup;
+
+      console.log(
+        "[worker] initFromText: text length",
+        text ? text.length : null
+      );
+
+      const parsed = JSON.parse(text) as GraphT;
+
+      console.log("[worker] parsed graph", {
+        nodes: parsed.nodes.length,
+        links: parsed.links.length,
+        sampleNode: parsed.nodes[0],
+        sampleLink: parsed.links[0],
+      });
+
+      const { fileGroup, chunkGroup } = detectGroups(
+        parsed.nodes,
+        parsed.links,
+        hintFileGroup,
+        hintChunkGroup
+      );
+      FILE_GROUP = fileGroup;
+      CHUNK_GROUP = chunkGroup;
+
+      buildFeatureIndex(parsed, fileGroup, chunkGroup);
+
+      (postMessage as any)({
+        type: "ready",
+        featureIds,
+        chunkCount: chunkIds.length,
+        fileGroup,
+        chunkGroup,
+      });
+    } else if (msg.type === "compute") {
+      const selected: string[] = msg.selected ?? [];
+      const mode: Mode = msg.mode === "ALL" ? "ALL" : "ANY";
+      const chunks = computeChunks(selected, mode);
+      (postMessage as any)({ type: "result", chunks });
+    }
+  } catch (e: any) {
+    console.error("[worker] error", e);
+    (postMessage as any)({
+      type: "error",
+      error: e?.message ?? String(e),
+    });
+  }
+};

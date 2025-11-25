@@ -16,18 +16,43 @@ export default function ChunkFinder() {
   const [isComputing, setIsComputing] = useState(false);
   const [progress, setProgress] = useState(0);
   const [progressMsg, setProgressMsg] = useState("");
-  const [fileGroup, setFileGroup] = useState(0);
-  const [chunkGroup, setChunkGroup] = useState(3);
+  // const [fileGroup, setFileGroup] = useState(0);
+  // const [chunkGroup, setChunkGroup] = useState(3);
 
   const [featureIds, setFeatureIds] = useState<string[]>([]);
   const [chunkCount, setChunkCount] = useState<number>(0);
 
+  // useEffect(() => {
+  //   const w = new Worker(WorkerURL, { type: "module" });
+  //   w.onmessage = (ev: MessageEvent) => {
+  //     const msg = ev.data;
+  //     if (msg.type === "progress") { setProgress(msg.pct); setProgressMsg(msg.msg); }
+  //     else if (msg.type === "ready") { setFeatureIds([]); setChunkCount(msg.chunkCount ?? 0); }
+  //     else if (msg.type === "result") { setResults(msg.chunks as string[]); setIsComputing(false); }
+  //     else if (msg.type === "error") { setErr(msg.error); setIsComputing(false); }
+  //   };
+  //   setWorker(w);
+  //   return () => { w.terminate(); };
+  // }, []);
+
   useEffect(() => {
     const w = new Worker(WorkerURL, { type: "module" });
+    console.log("[UI] worker created", w);
+
     w.onmessage = (ev: MessageEvent) => {
       const msg = ev.data;
+      console.log("[UI] message from worker:", msg);   // <--- add this
+
       if (msg.type === "progress") { setProgress(msg.pct); setProgressMsg(msg.msg); }
-      else if (msg.type === "ready") { setFeatureIds([]); setChunkCount(msg.chunkCount ?? 0); }
+      // else if (msg.type === "ready") { 
+      //   setFeatureIds(msg.featureIds ?? []);          // we'll send this from worker
+      //   setChunkCount(msg.chunkCount ?? 0); 
+      // }
+      else if (msg.type === "ready") {
+        console.log("[UI] ready from worker", msg);
+        setFeatureIds(msg.featureIds ?? []);
+        setChunkCount(msg.chunkCount ?? 0);
+      }
       else if (msg.type === "result") { setResults(msg.chunks as string[]); setIsComputing(false); }
       else if (msg.type === "error") { setErr(msg.error); setIsComputing(false); }
     };
@@ -35,20 +60,34 @@ export default function ChunkFinder() {
     return () => { w.terminate(); };
   }, []);
 
+
   const filteredFeatures = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return featureIds;
     return featureIds.filter(id => id.toLowerCase().includes(q));
   }, [featureIds, query]);
 
+  // async function onUpload(e: React.ChangeEvent<HTMLInputElement>) {
+  //   setErr(null); setResults([]); setSelected(new Set());
+  //   const f = e.target.files?.[0];
+  //   if (!f || !worker) return;
+  //   const text = await f.text();
+  //   //worker.postMessage({ type: "initFromText", text, fileGroup, chunkGroup });
+  //   worker.postMessage({ type: "initFromText", text });
+  //   //if (fileInputRef.current) fileInputRef.current.value = "";
+  // }
   async function onUpload(e: React.ChangeEvent<HTMLInputElement>) {
     setErr(null); setResults([]); setSelected(new Set());
     const f = e.target.files?.[0];
-    if (!f || !worker) return;
+    if (!f || !worker) {
+      console.log("[UI] no file or no worker", { f, worker });
+      return;
+    }
     const text = await f.text();
-    worker.postMessage({ type: "initFromText", text, fileGroup, chunkGroup });
-    if (fileInputRef.current) fileInputRef.current.value = "";
+    console.log("[UI] sending initFromText, length", text.length);
+    worker.postMessage({ type: "initFromText", text });
   }
+
 
   async function compute() {
     if (!worker) return;
@@ -91,7 +130,7 @@ export default function ChunkFinder() {
             <div className="rounded-2xl border bg-white p-4 shadow-sm space-y-3">
               <label className="block text-sm font-medium mb-2">Upload graph JSON</label>
               <input ref={fileInputRef} type="file" accept="application/json,.json" onChange={onUpload} className="block w-full text-sm" />
-              <div className="flex gap-2 mt-3 text-sm">
+              {/* <div className="flex gap-2 mt-3 text-sm">
                 <div>
                   <label>File group</label>
                   <input type="number" value={fileGroup} onChange={e => setFileGroup(Number(e.target.value))} className="ml-2 w-16 border rounded" />
@@ -100,7 +139,7 @@ export default function ChunkFinder() {
                   <label>Chunk group</label>
                   <input type="number" value={chunkGroup} onChange={e => setChunkGroup(Number(e.target.value))} className="ml-2 w-16 border rounded" />
                 </div>
-              </div>
+              </div> */}
               {err && <p className="text-red-600 text-sm mt-2">{err}</p>}
             </div>
 

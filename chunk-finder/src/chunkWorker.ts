@@ -34,21 +34,10 @@ console.log("[worker] loaded");
 
 function detectGroups(
   nodes: NodeT[],
-  links: LinkT[],
-  hintFileGroup?: number,
-  hintChunkGroup?: number
+  links: LinkT[]
 ): { fileGroup: number; chunkGroup: number } {
-  // Infer which node group represents files vs chunks (or trust hints).
+  // Infer which node group represents files vs chunks based off of prefixes
   const groups = Array.from(new Set(nodes.map((n) => n.group)));
-
-  // If caller supplied explicit groups, trust them
-  if (typeof hintFileGroup === "number" && typeof hintChunkGroup === "number") {
-    console.log("[worker] using hinted groups", {
-      fileGroup: hintFileGroup,
-      chunkGroup: hintChunkGroup,
-    });
-    return { fileGroup: hintFileGroup, chunkGroup: hintChunkGroup };
-  }
 
   // 1) Try to infer from ID prefixes
   const idsByGroup = new Map<number, string[]>();
@@ -78,51 +67,7 @@ function detectGroups(
     });
     return { fileGroup: fileHint, chunkGroup: chunkHint };
   }
-
-  // 2) Very simple structural heuristic as a fallback
-  const groupOf = new Map<string, number>();
-  for (const n of nodes) groupOf.set(n.id, n.group);
-
-  const neighborGroups = new Map<number, Set<number>>();
-  for (const { source, target } of links) {
-    const gs = groupOf.get(source);
-    const gt = groupOf.get(target);
-    if (gs == null || gt == null || gs === gt) continue;
-    if (!neighborGroups.has(gs)) neighborGroups.set(gs, new Set());
-    if (!neighborGroups.has(gt)) neighborGroups.set(gt, new Set());
-    neighborGroups.get(gs)!.add(gt);
-    neighborGroups.get(gt)!.add(gs);
-  }
-
-  // chunk group = group with highest degree (connected to many others)
-  let chunkGroup = groups[0];
-  let bestDeg = -1;
-  for (const g of groups) {
-    const deg = neighborGroups.get(g)?.size ?? 0;
-    if (deg > bestDeg) {
-      bestDeg = deg;
-      chunkGroup = g;
-    }
-  }
-
-  // file group = some other group; pick the one with fewest neighbors
-  let fileGroup = groups[0];
-  let bestScore = Infinity;
-  for (const g of groups) {
-    if (g === chunkGroup) continue;
-    const deg = neighborGroups.get(g)?.size ?? 0;
-    if (deg < bestScore) {
-      bestScore = deg;
-      fileGroup = g;
-    }
-  }
-
-  console.log("[worker] detected groups from structure", {
-    fileGroup,
-    chunkGroup,
-  });
-
-  return { fileGroup, chunkGroup };
+  throw new Error("Could not detect file/chunk groups from prefixes");
 }
 
 // ---------- Index building ----------
@@ -321,8 +266,6 @@ self.onmessage = (ev: MessageEvent) => {
   try {
     if (msg.type === "initFromText") {
       const text: string = msg.text;
-      const hintFileGroup: number | undefined = msg.fileGroup;
-      const hintChunkGroup: number | undefined = msg.chunkGroup;
 
       console.log(
         "[worker] initFromText: text length",
@@ -340,9 +283,7 @@ self.onmessage = (ev: MessageEvent) => {
 
       const { fileGroup, chunkGroup } = detectGroups(
         parsed.nodes,
-        parsed.links,
-        hintFileGroup,
-        hintChunkGroup
+        parsed.links
       );
       FILE_GROUP = fileGroup;
       CHUNK_GROUP = chunkGroup;

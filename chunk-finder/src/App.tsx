@@ -53,7 +53,12 @@ export default function ChunkFinder() {
         setFeatureIds(msg.featureIds ?? []);
         setChunkCount(msg.chunkCount ?? 0);
       }
-      else if (msg.type === "result") { setResults(msg.chunks as string[]); setIsComputing(false); }
+      else if (msg.type === "result") { 
+        setResults(msg.chunks as string[]); 
+        setProgress(100); 
+        setProgressMsg("Done"); 
+        setIsComputing(false); 
+      }
       else if (msg.type === "error") { setErr(msg.error); setIsComputing(false); }
     };
     setWorker(w);

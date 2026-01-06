@@ -24,7 +24,7 @@ let featureToChunks: Map<string, Set<string>> | null = null;
 let featureIds: string[] = [];
 let chunkIds: string[] = [];
 
-// Just for debugging if you want to log what was chosen
+//Just for debugging to log what was chosen
 let FILE_GROUP: number | null = null;
 let CHUNK_GROUP: number | null = null;
 
@@ -38,6 +38,7 @@ function detectGroups(
   hintFileGroup?: number,
   hintChunkGroup?: number
 ): { fileGroup: number; chunkGroup: number } {
+  // Infer which node group represents files vs chunks (or trust hints).
   const groups = Array.from(new Set(nodes.map((n) => n.group)));
 
   // If caller supplied explicit groups, trust them
@@ -131,14 +132,21 @@ function buildFeatureIndex(
   fileGroup: number,
   chunkGroup: number
 ): void {
+  // Map node id -> group for quick lookup.
   const groupOf = new Map<string, number>();
   for (const n of graph.nodes) groupOf.set(n.id, n.group);
 
   const map = new Map<string, Set<string>>();
   const feats: string[] = [];
   const chunks: string[] = [];
+  let missingEndpoint = 0;
+  let nonFeatureChunkEdge = 0;
+  const edgeGroupPairs = new Map<string, number>();
+  const fileToChunks = new Map<string, Set<string>>();
+  const featureToFiles = new Map<string, Set<string>>();
 
   for (const n of graph.nodes) {
+    // Classify nodes into chunks vs features (files are excluded).
     if (n.group === chunkGroup) {
       chunks.push(n.id);
     } else if (n.group !== fileGroup) {
@@ -150,7 +158,13 @@ function buildFeatureIndex(
   for (const { source, target } of graph.links) {
     const gs = groupOf.get(source);
     const gt = groupOf.get(target);
-    if (gs == null || gt == null) continue;
+    if (gs == null || gt == null) {
+      missingEndpoint++;
+      continue;
+    }
+
+    const pairKey = gs <= gt ? `${gs}-${gt}` : `${gt}-${gs}`;
+    edgeGroupPairs.set(pairKey, (edgeGroupPairs.get(pairKey) ?? 0) + 1);
 
     const sourceIsFile = gs === fileGroup;
     const sourceIsChunk = gs === chunkGroup;
@@ -160,13 +174,44 @@ function buildFeatureIndex(
     const sourceIsFeature = !sourceIsFile && !sourceIsChunk;
     const targetIsFeature = !targetIsFile && !targetIsChunk;
 
-    // feature ↔ chunk edges (undirected)
+    // Capture file↔chunk for two-hop mapping
+    if (sourceIsFile && targetIsChunk) {
+      if (!fileToChunks.has(source)) fileToChunks.set(source, new Set());
+      fileToChunks.get(source)!.add(target);
+    } else if (targetIsFile && sourceIsChunk) {
+      if (!fileToChunks.has(target)) fileToChunks.set(target, new Set());
+      fileToChunks.get(target)!.add(source);
+    }
+
+    // Capture feature↔file adjacency
+    if (sourceIsFeature && targetIsFile) {
+      if (!featureToFiles.has(source)) featureToFiles.set(source, new Set());
+      featureToFiles.get(source)!.add(target);
+    } else if (targetIsFeature && sourceIsFile) {
+      if (!featureToFiles.has(target)) featureToFiles.set(target, new Set());
+      featureToFiles.get(target)!.add(source);
+    }
+
+    // feature ↔ chunk edges (undirected) — keep direct mapping if it exists
     if (sourceIsFeature && targetIsChunk) {
       if (!map.has(source)) map.set(source, new Set());
       map.get(source)!.add(target);
     } else if (targetIsFeature && sourceIsChunk) {
       if (!map.has(target)) map.set(target, new Set());
       map.get(target)!.add(source);
+    } else {
+      nonFeatureChunkEdge++;
+    }
+  }
+
+  // two-hop mapping: feature -> file -> chunks
+  for (const [feature, files] of featureToFiles.entries()) {
+    for (const file of files) {
+      const cset = fileToChunks.get(file);
+      if (!cset) continue;
+      if (!map.has(feature)) map.set(feature, new Set());
+      const targetSet = map.get(feature)!;
+      for (const c of cset) targetSet.add(c);
     }
   }
 
@@ -180,6 +225,32 @@ function buildFeatureIndex(
     featureCount: featureIds.length,
     chunkCount: chunkIds.length,
     featureKeysInMap: featureToChunks.size,
+  });
+
+  console.log("[worker] indexing diagnostics", {
+    missingEndpoint,
+    nonFeatureChunkEdge,
+  });
+
+  // top edge group combinations (helps see what is actually connected)
+  const topPairs = Array.from(edgeGroupPairs.entries())
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 5);
+  console.log("[worker] top edge group pairs", topPairs);
+
+  if (graph.links.length > 0) {
+    const sampleLinks = graph.links.slice(0, 5).map((l) => ({
+      source: l.source,
+      sourceGroup: groupOf.get(l.source),
+      target: l.target,
+      targetGroup: groupOf.get(l.target),
+    }));
+    console.log("[worker] sample link groups", sampleLinks);
+  }
+
+  console.log("[worker] sample nodes", {
+    features: feats.slice(0, 3),
+    chunks: chunks.slice(0, 3),
   });
 
   if (featureToChunks.size > 0) {

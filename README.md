@@ -1,15 +1,52 @@
 # InteractiveVis_NatGeo
-Interactive Visualization, made using React, for interacting with the output of the acoustic_knowledge_discovery pipeline. 
 
-## How To Run
+React app for exploring the output of the `acoustic_knowledge_discovery` pipeline. Upload a graph JSON, select features, and quickly find the chunk IDs connected to them.
 
-1. Open up terminal & navigate to the directory where you want the code to live
+## Prerequisites
+- Node 20+ and npm installed.
+- A graph JSON exported from the `acoustic_knowledge_discovery` pipeline (see format below).
 
-2. Enter this command into terminal: 
-`git clone https://github.com/SiyaKamboj/InteractiveVis_NatGeo.git`
+## How to Install
+1) Clone: `git clone https://github.com/SiyaKamboj/InteractiveVis_NatGeo.git`
+2) Install deps: `cd InteractiveVis_NatGeo/chunk-finder && npm install`
+3) Run the dev server: `npm run dev`
+4) Open the printed URL (usually http://localhost:5173/) in your browser.
 
-3. Inside the "InteractiveVis_NatGeo" directory, type `cd chunk-finder` into terminal
+## Using the app
+1) Click **Upload graph JSON** and select your graph file.
+2) Use the search box to filter feature nodes, then check the ones you care about.
+3) Choose matching mode:
+   - **ALL** — chunks connected to every selected feature.
+   - **ANY** — chunks connected to at least one selected feature.
+4) Click **Find chunks**.
+5) Copy the results or download them as `chunks.csv`.
 
-4. Inside the chunk-finder subdirectory, run `npm run dev`
+You can re-upload a new graph at any time; it resets the selection and results.
 
-5. A link ( ie http://localhost:5173/ ) should pop up in the terminal. Enter this link into your browser (ie chrome, safari, etc). The website should be up!
+## Expected graph format
+The app auto-detects which node group represents files vs chunks using ID prefixes. Your JSON should be an object with `nodes` and `links`:
+```json
+{
+  "nodes": [
+    { "id": "file_name_example.wav", "group": 0 },
+    { "id": "chunk_id_123", "group": 3 },
+    { "id": "some_feature", "group": 2 }
+  ],
+  "links": [
+    { "source": "file_name_example.wav", "target": "chunk_id_123" },
+    { "source": "some_feature", "target": "file_name_example.wav" }
+  ]
+}
+```
+- Files should have IDs like `file_name_...` or end with common audio extensions (`.wav`, `.mp3`, `.flac`, `.ogg`).
+- Chunks should have IDs like `chunk_id_...`.
+- Everything else is treated as a feature node.
+
+<!-- ## Additional scripts
+- `npm run build` — type-check and build for production.
+- `npm run preview` — serve the production build locally.
+- `npm run lint` — run ESLint. -->
+
+## Troubleshooting
+- If the worker never becomes ready, double-check your JSON is valid and matches the expected ID patterns above.
+<!-- - If dependencies fail to install, ensure you are on Node 20+ and delete `node_modules` before reinstalling.  -->
